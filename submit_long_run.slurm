@@ -16,7 +16,6 @@ echo "pwd: $(pwd)"
 eval "$( /home/tienyiao/miniconda3/bin/conda shell.bash hook 2> /dev/null)"
 conda activate jax
 
-source /home/tienyiao/.bashrc_jcm_v2
 export PYTHONPATH=/home/tienyiao/projects_local/project_jax-esm/jem_repo/jax-esm:$PYTHONPATH
 export PYTHONHASHSEED=0
 #export XLA_FLAGS="--xla_gpu_deterministic_ops=true"
@@ -27,7 +26,7 @@ JOB_ID=${SLURM_JOBID:-NO_JOB_ID}
 
 terrain_planet_type=double_drake
 time python3 main_forward.py \
-    --total-simulation-days $(( 365 * 1000 ))       \
+    --total-simulation-days $(( 365 * 1))           \
     --simulation-interval-days 365                  \
     --truncation-number 31                          \
     --simulation-name long_run                      \
