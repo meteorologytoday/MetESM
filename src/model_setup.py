@@ -62,6 +62,7 @@ def build_model(
     coupling_timestep,
     calendar,
     terrain_planet_type,
+    ocean_land_sea_mask_file,
     terrain_output_directory="./data",
     veros_dt_mom=3600.0,
     veros_dt_tracer=3600.0,
@@ -80,6 +81,13 @@ def build_model(
     `start_datetime` at which to freeze the atmosphere's seasonal (solar and
     climatological-forcing) cycle -- e.g. `0` pins it at `start_datetime`
     itself. The diurnal cycle keeps advancing normally. See `_freeze_season`.
+
+    `ocean_land_sea_mask_file`: path to a rotated-grid land-sea mask file
+    (e.g. `landsea_mask_RG_4.00deg.nc`) in the format produced by
+    `veros-rotated-coordinate/src/convert_era5_landsea_mask.py`. This file's
+    own un-rotated `lat_bnds`/`lon_bnds` determine the ocean's grid shape and
+    extent, independent of the atmosphere's resolution -- see
+    `generateVerosSetup` in `veros_case_setup.py`.
     """
 
 
@@ -103,7 +111,6 @@ def build_model(
     JCM.make_jem_compatible(atm_model, coupling_timestep=coupling_timestep)
     if freeze_season_at_day is not None:
         _freeze_season(atm_model, freeze_season_at_day)
-    atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
 
     # Longitude/latitude (in degrees) of the atmosphere's nodal grid, used by
     # `report_first_nonfinite` in `interaction` to locate non-finite values.
@@ -117,9 +124,7 @@ def build_model(
         os.remove(f)
 
     ocn_model = generateVerosSetup(
-        nx=atm_D2_nodal_shape[0],
-        ny=atm_D2_nodal_shape[1],
-        land_sea_mask_file=modified_jcm_terrain_file,
+        land_sea_mask_file=ocean_land_sea_mask_file,
         dt_mom=veros_dt_mom,
         dt_tracer=veros_dt_tracer,
         ddz=[50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0][:number_of_ocean_layers],

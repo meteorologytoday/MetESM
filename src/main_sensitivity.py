@@ -38,6 +38,7 @@ parser.add_argument("--truncation-number", type=int, help="Truncation number", d
 parser.add_argument("--jcm-timestep-min", type=int, help="JCM timestep in minutes", default=30)
 parser.add_argument("--veros-timestep-min", type=int, help="Veros timestep in minutes", default=30)
 parser.add_argument("--terrain-planet-type", type=str, help="Simulation name for output", required=True)
+parser.add_argument("--ocean-land-sea-mask-file", type=str, help="Path to the rotated-grid ocean land-sea mask file (e.g. landsea_mask_RG_4.00deg.nc)", required=True)
 parser.add_argument("--initial-condition", type=str, help="The checkpoint path containing initial condition to be used", default=None)
 
 args = parser.parse_args()
@@ -60,6 +61,7 @@ model, config = build_model(
     coupling_timestep=coupling_timestep,
     calendar=calendar,
     terrain_planet_type=args.terrain_planet_type,
+    ocean_land_sea_mask_file=args.ocean_land_sea_mask_file,
     jcm_dt = args.jcm_timestep_min * 60.0,
     veros_dt_mom=args.veros_timestep_min * 60,
     veros_dt_tracer=args.veros_timestep_min * 60,

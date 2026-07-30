@@ -31,29 +31,38 @@ import jax.numpy as npx
 import xarray as xr
 
 def generateVerosSetup(
-    nx: int,
-    ny: int,
     land_sea_mask_file: str,
     ddz: Sequence[float] = [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0],
     dt_mom: float = 1800.0,
     dt_tracer: float = 1800.0,
 ):
 
+    mask_ds = xr.open_dataset(land_sea_mask_file)
+
+    # `lat_bnds`/`lon_bnds` are the un-rotated (pre-rotation) bounds of the
+    # regular j/i computational grid -- these size the Veros grid itself.
+    lat_bnds = mask_ds["lat_bnds"].to_numpy()
+    lon_bnds = mask_ds["lon_bnds"].to_numpy()
+    ny, nx = lat_bnds.shape[0], lon_bnds.shape[0]
+    dyt = float(lat_bnds[0, 1] - lat_bnds[0, 0])
+    dxt = float(lon_bnds[0, 1] - lon_bnds[0, 0])
+    y_origin: float = float(lat_bnds[0, 0])
+    x_origin: float = float(lon_bnds[0, 0])
+
+    # `true_lat` is the actual geographic latitude of each (j, i) cell.
+    # Since the grid's poles are rotated away from the real poles, this is
+    # not the same as the grid's own yt latitude, so it must be used for
+    # the Coriolis parameter instead of yt.
+    true_lat = mask_ds["true_lat"].to_numpy().transpose()  # (j, i) -> (xt, yt)
+
     def get_land_sea_mask():
-        land_sea_mask_file
-        # original 1: land, 0: ocean
-        land_sea_mask = 1 - xr.open_dataset(land_sea_mask_file)["lsm"].to_numpy()
-        return land_sea_mask
+        # file convention: 1 = land, 0 = sea; Veros kbot wants 0 = land
+        return 1 - mask_ds["land_sea_mask"].to_numpy().astype(int).transpose()
 
     p = 1.4
-    
+
     ddz = npx.array(ddz)
     nz = len(ddz)
-
-    dxt = 360.0 / nx
-    dyt = 180.0 / ny
-    x_origin:float = 0.0
-    y_origin:float = -90.0
 
     class VerosCaseSetup(VerosSetup):
         """A model using spherical coordinates with a partially closed domain.
@@ -154,7 +163,7 @@ def generateVerosSetup(
             vs = state.variables
             settings = state.settings
             vs.coriolis_t = update(
-                vs.coriolis_t, at[...], 2 * settings.omega * npx.sin(vs.yt[None, :] / 180.0 * settings.pi)
+                vs.coriolis_t, at[2:-2, 2:-2], 2 * settings.omega * npx.sin(true_lat / 180.0 * settings.pi)
             )
 
         @veros_routine

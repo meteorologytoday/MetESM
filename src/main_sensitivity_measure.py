@@ -49,6 +49,7 @@ if __name__ == "__main__":
     parser.add_argument("--jcm-timestep-min", type=int, help="JCM timestep in minutes", default=30)
     parser.add_argument("--veros-timestep-min", type=int, help="Veros timestep in minutes", default=30)
     parser.add_argument("--terrain-planet-type", type=str, help="Simulation name for output", required=True)
+    parser.add_argument("--ocean-land-sea-mask-file", type=str, help="Path to the rotated-grid ocean land-sea mask file (e.g. landsea_mask_RG_4.00deg.nc)", required=True)
     parser.add_argument("--test-ensemble-members", type=int, nargs="+", help="The ensemble members to be used", default=[1])
     parser.add_argument("--output-filename", type=str, help="The result in netcdf file.", default="sensitivity_data.nc")
     parser.add_argument("--measure", type=str, nargs="+", choices=sorted(MEASURES.keys()), default=["ocean_temperature_zonal_mean"],
@@ -92,6 +93,7 @@ if __name__ == "__main__":
             coupling_timestep=coupling_timestep,
             calendar=calendar,
             terrain_planet_type=args.terrain_planet_type,
+            ocean_land_sea_mask_file=args.ocean_land_sea_mask_file,
             jcm_dt=args.jcm_timestep_min * 60.0,
             veros_dt_mom=args.veros_timestep_min * 60,
             veros_dt_tracer=args.veros_timestep_min * 60,
