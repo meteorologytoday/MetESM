@@ -39,6 +39,7 @@ parser.add_argument("--max-rerun-attempts", type=int, help="If model exploded, t
 parser.add_argument("--explode-log", type=str, help="Path to log file for recording model explosion events.", default="explode.log")
 parser.add_argument("--debug-mode", action="store_true", help="Turn on debug mode. Detect NaN and enter breakpoint.")
 parser.add_argument("--terrain-planet-type", type=str, help="Simulation name for output", required=True)
+parser.add_argument("--grid-folder", type=str, help="Grid folder containing grid, land-sea mask, and regrid weightings.", required=True)
 args = parser.parse_args()
 
 print(f"jcm library is located at: {jcm.__file__}")
@@ -75,6 +76,7 @@ model, config = build_model(
     jcm_dt = args.jcm_timestep_min * 60.0,
     veros_dt_mom=args.veros_timestep_min * 60,
     veros_dt_tracer=args.veros_timestep_min * 60,
+    grid_folder = args.grid_folder,
 )
 ocn_model = model.components["ocn"].raw_component
 

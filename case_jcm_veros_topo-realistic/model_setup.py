@@ -5,10 +5,12 @@
 
 import glob
 import os
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import xarray as xr
 
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -16,7 +18,9 @@ from jcm.terrain import TerrainData
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
 from jem.components import JCM, Veros, SlabOceanModel
+from jem.components.slab.grid import generate_slab_grid
 from jem.base.coupler import Coupler
+from jem.utils.esmf_regrid import ESMFRegridder
 
 from modify_jcm_terrain import modify_jcm_terrain
 from veros_case_setup import generateVerosSetup
@@ -24,6 +28,48 @@ from veros_case_setup import generateVerosSetup
 from veros.core.operators import update, at
 
 one_second = jdt.to_timedelta(1, "second")
+
+def is_pytree_all_finite(tree):
+    return jax.tree_util.tree_reduce(
+        lambda acc, x: acc & jnp.all(jnp.isfinite(x)),
+        tree,
+        jnp.array(True),
+    )
+
+def report_first_nonfinite(name, x, lon=None, lat=None):
+    """If `x` has any non-finite value, debug-print the index of its
+    first occurrence (and lon/lat, if `x` is a 2D (lon, lat) field).
+
+    `jax.debug.print` cannot format a tuple-of-tracers (e.g. the result
+    of `jnp.unravel_index`) directly, so each index component is passed
+    as its own scalar kwarg. The format string is built in Python from
+    `x.ndim`, which is static under tracing.
+    """
+    x = jnp.asarray(x)
+    finite = jnp.isfinite(x)
+    any_bad = jnp.any(~finite)
+    flat_idx = jnp.argmin(finite.ravel().astype(jnp.int32))
+    idx = jnp.unravel_index(flat_idx, x.shape)
+    val = x.ravel()[flat_idx]
+
+    idx_fmt = ", ".join(f"{{i{d}}}" for d in range(x.ndim))
+    idx_kwargs = {f"i{d}": idx[d] for d in range(x.ndim)}
+
+    def report(_):
+        fmt = name + f": first non-finite at idx=({idx_fmt}), value={{val:.6e}}"
+        kwargs = dict(idx_kwargs, val=val)
+        if lon is not None and lat is not None and x.ndim == 2:
+            fmt += ", lon={lo:.2f}, lat={la:.2f}"
+            # `lon`/`lat` are plain numpy arrays (since `jnp.pi` is a
+            # Python float, `numpy_array * 180 / jnp.pi` stays numpy).
+            # Indexing a numpy array with a JAX tracer raises
+            # TracerArrayConversionError, so convert to jnp first.
+            kwargs["lo"] = jnp.asarray(lon)[idx[0]]
+            kwargs["la"] = jnp.asarray(lat)[idx[1]]
+        jax.debug.print(fmt, **kwargs)
+
+    jax.lax.cond(any_bad, report, lambda _: None, None)
+
 
 
 def _freeze_season(atm_model, freeze_season_at_day):
@@ -69,6 +115,7 @@ def build_model(
     number_of_ocean_layers=None,
     debug_mode=False,
     freeze_season_at_day=None,
+    grid_folder: str,
 ):
     """Build the coupled JCM + Veros + SlabOceanModel system.
 
@@ -82,21 +129,42 @@ def build_model(
     itself. The diurnal cycle keeps advancing normally. See `_freeze_season`.
     """
 
-
+    landsea_mask_threshold = 0.5
+    grid_folder = Path(grid_folder)
+    data_files = {
+        "grid" : {
+            # No need for atm. It is built into jcm
+            "ocn" : grid_folder / "RotatedGaussianLatLon.SCRIP.nc",
+        },
+        "landsea_mask" : {
+            "atm" : grid_folder / f"landsea_mask_fraction_JCM_T{truncation_number:d}.nc",
+            "ocn" : grid_folder / f"landsea_mask_fraction_RotatedGaussianLatLon.nc",
+        },
+        "regrid" : {
+            "a2o" : {
+                "bilinear" : ESMFRegridder(str(grid_folder / f"weight_algo-bilinear_JCM_T{truncation_number:d}_to_RotatedGaussianLatLon.nc")),
+                "conserve" : ESMFRegridder(str(grid_folder / f"weight_algo-conserve_JCM_T{truncation_number:d}_to_RotatedGaussianLatLon.nc")),
+            },
+            "o2a" : {
+                "bilinear" : ESMFRegridder(str(grid_folder / f"weight_algo-bilinear_RotatedGaussianLatLon_to_JCM_T{truncation_number:d}.nc")),
+                "conserve" : ESMFRegridder(str(grid_folder / f"weight_algo-conserve_RotatedGaussianLatLon_to_JCM_T{truncation_number:d}.nc")),
+            },
+        },
+    }
 
     coords = get_speedy_coords(spectral_truncation=truncation_number)
 
-    jcm_files = generate_jcm_forcing_and_topography_files(resolution=truncation_number)
-    modified_jcm_terrain_file = modify_jcm_terrain(
-        jcm_files["terrain"], terrain_planet_type, terrain_output_directory,
-    )
-    terrain = TerrainData.from_file(modified_jcm_terrain_file, coords=coords)
+    #jcm_files = generate_jcm_forcing_and_topography_files(resolution=truncation_number)
+    #modified_jcm_terrain_file = modify_jcm_terrain(
+    #    jcm_files["terrain"], terrain_planet_type, terrain_output_directory,
+    #)
+    #terrain = TerrainData.from_file(modified_jcm_terrain_file, coords=coords)
 
     # Create JCM
     atm_model = jcm.model.Model(
         coords=coords,
         start_date=start_datetime,
-        terrain=terrain,
+        #terrain=terrain,
         time_step=jcm_dt/60.0,
         calendar=calendar,
     )
@@ -117,9 +185,9 @@ def build_model(
         os.remove(f)
 
     ocn_model = generateVerosSetup(
-        nx=atm_D2_nodal_shape[0],
-        ny=atm_D2_nodal_shape[1],
-        land_sea_mask_file=modified_jcm_terrain_file,
+        scrip_grid_file = data_files["grid"]["ocn"],
+        landsea_mask_file = data_files["landsea_mask"]["ocn"],
+        landsea_mask_threshold = landsea_mask_threshold,
         dt_mom=veros_dt_mom,
         dt_tracer=veros_dt_tracer,
         ddz=[50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0][:number_of_ocean_layers],
@@ -128,13 +196,26 @@ def build_model(
     Veros.make_jem_compatible(ocn_model, coupling_timestep=coupling_timestep)
 
     # Create Slab Ocean model
+    #
+    # `jem.components.slab.grid.load_jcm_fractional_mask` does a bare
+    # `jnp.asarray(ds["lsm"])`, but this file's "lsm" carries an extra
+    # singleton `valid_time` axis and (lat, lon) order rather than JEM's
+    # (lon, lat) -- squeeze and transpose before handing it to SlabGrid.
+    atm_mask_ds = xr.open_dataset(data_files["landsea_mask"]["atm"])
+    atm_lsm = atm_mask_ds["lsm"].to_numpy()
+    if atm_lsm.ndim == 3:
+        atm_lsm = atm_lsm[0]
+    atm_fractional_mask = jnp.asarray(atm_lsm.T)  # (lat, lon) -> (lon, lat)
+
+    fakelnd_grid = generate_slab_grid(
+        f"JCM::T{truncation_number:d}",
+        fractional_mask=atm_fractional_mask,
+    )
     fakelnd_model = SlabOceanModel(
-        grid_specification=f"JCM::T{truncation_number:d}",
+        grid=fakelnd_grid,
         start_datetime=start_datetime,
         timestep=coupling_timestep / one_second,
-        mask_file=modified_jcm_terrain_file,
         forcing_method=None,
-        mask_value=1.0,
         calendar=calendar,
     )
 
@@ -145,52 +226,14 @@ def build_model(
     # function. In this example, we simply define a function `interaction`
     # as below.
 
+    a2o_regridder = data_files["regrid"]["a2o"]["conserve"]
+    o2a_regridder = data_files["regrid"]["o2a"]["bilinear"]
+
     def veros_to_jcm_regridder(arr):
-        return arr  # jnp.pad(arr, ((0, 0), (4, 4)), constant_values=150)
+        return o2a_regridder(arr)
 
     def jcm_to_veros_regridder(arr):
-        return arr  # arr[:, 4:-4]
-
-    def is_pytree_all_finite(tree):
-        return jax.tree_util.tree_reduce(
-            lambda acc, x: acc & jnp.all(jnp.isfinite(x)),
-            tree,
-            jnp.array(True),
-        )
-
-    def report_first_nonfinite(name, x, lon=None, lat=None):
-        """If `x` has any non-finite value, debug-print the index of its
-        first occurrence (and lon/lat, if `x` is a 2D (lon, lat) field).
-
-        `jax.debug.print` cannot format a tuple-of-tracers (e.g. the result
-        of `jnp.unravel_index`) directly, so each index component is passed
-        as its own scalar kwarg. The format string is built in Python from
-        `x.ndim`, which is static under tracing.
-        """
-        x = jnp.asarray(x)
-        finite = jnp.isfinite(x)
-        any_bad = jnp.any(~finite)
-        flat_idx = jnp.argmin(finite.ravel().astype(jnp.int32))
-        idx = jnp.unravel_index(flat_idx, x.shape)
-        val = x.ravel()[flat_idx]
-
-        idx_fmt = ", ".join(f"{{i{d}}}" for d in range(x.ndim))
-        idx_kwargs = {f"i{d}": idx[d] for d in range(x.ndim)}
-
-        def report(_):
-            fmt = name + f": first non-finite at idx=({idx_fmt}), value={{val:.6e}}"
-            kwargs = dict(idx_kwargs, val=val)
-            if lon is not None and lat is not None and x.ndim == 2:
-                fmt += ", lon={lo:.2f}, lat={la:.2f}"
-                # `lon`/`lat` are plain numpy arrays (since `jnp.pi` is a
-                # Python float, `numpy_array * 180 / jnp.pi` stays numpy).
-                # Indexing a numpy array with a JAX tracer raises
-                # TracerArrayConversionError, so convert to jnp first.
-                kwargs["lo"] = jnp.asarray(lon)[idx[0]]
-                kwargs["la"] = jnp.asarray(lat)[idx[1]]
-            jax.debug.print(fmt, **kwargs)
-
-        jax.lax.cond(any_bad, report, lambda _: None, None)
+        return a2o_regridder(arr)
 
 
     # Note: Remember to return the `coupled_carry` at the end.
@@ -205,8 +248,15 @@ def build_model(
         # its own function or module.
         drag_coefficient = 1e-3  # dimensionless
         air_density = 1.22  # kg / m^3
-        wind_x = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].u0)
-        wind_y = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].v0)
+        # TODO: `jcm_to_veros_regridder` interpolates u0/v0 component-wise;
+        # it doesn't rotate the wind vector into the ocean grid's local
+        # (rotated) frame. Since the ocean grid's pole is displaced from the
+        # true pole, true-east/north isn't aligned with the grid's own x/y
+        # axes everywhere, so this is an approximation. Fine for now, but a
+        # correct version needs the per-cell rotation angle (the SCRIP
+        # file's `grid_angle`/`grid_cos_angle`/`grid_sin_angle`) applied here.
+        wind_x = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].u0)
+        wind_y = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].v0)
         # `sqrt` has an infinite derivative at 0, so AD through `sqrt(x)`
         # blows up to NaN as x -> 0, even though the primal value (0) stays
         # finite. Floor the *squared* speed -- sqrt's argument -- at
@@ -224,7 +274,7 @@ def build_model(
         # Cap total heat flux for now. There seems to be instability coming
         # from JCM. Need investigation.
         # total_heat_flux = jnp.clip(atm["derived"]["total_heat_flux"], min=-1372.0, max=1372.0)
-        total_heat_flux = atm["derived"]["total_heat_flux"]
+        total_heat_flux = atm["derived"].total_heat_flux
 
         # ===== simple "swamp" sea ice mask begin =====
         # Ported from `veros/setups/global_1deg/global_1deg.py`: once the
@@ -235,8 +285,8 @@ def build_model(
         # warms the ocean is negative.
         freezing_point_K = 273.15 - 1.8
         heat_flux = jcm_to_veros_regridder(total_heat_flux)
-        freshwater_flux = jcm_to_veros_regridder(atm["derived"]["total_freshwater_flux"])
-        not_frozen = ocn["derived"]["sea_surface_temperature"] > freezing_point_K
+        freshwater_flux = jcm_to_veros_regridder(atm["derived"].total_freshwater_flux)
+        not_frozen = ocn["derived"].sea_surface_temperature > freezing_point_K
         would_warm = heat_flux < 0
         ice_free = jnp.logical_or(not_frozen, would_warm)
         heat_flux = heat_flux * ice_free
@@ -248,16 +298,16 @@ def build_model(
         ocn["forcing"].surface_tauy = surface_tauy
         ocn["forcing"].heat_flux = heat_flux
         ocn["forcing"].freshwater_flux = freshwater_flux
-        ocn["forcing"].wind_x = jcm_to_veros_regridder(wind_x)
-        ocn["forcing"].wind_y = jcm_to_veros_regridder(wind_y)
-        fakelnd["forcing"].total_heat_flux = jcm_to_veros_regridder(total_heat_flux)
+        ocn["forcing"].wind_x = wind_x
+        ocn["forcing"].wind_y = wind_y
+        fakelnd["forcing"].total_heat_flux = total_heat_flux
         fakelnd["state"].sea_surface_temperature = jnp.clip(
             fakelnd["state"].sea_surface_temperature,
             200.0, #273.15 - 50.0,
             273.15 + 30.0,
         )
-        atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"]["sea_surface_temperature"])
-        atm["forcing"].stl_am = fakelnd["state"]["sea_surface_temperature"]
+        atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"].sea_surface_temperature)
+        atm["forcing"].stl_am = fakelnd["state"].sea_surface_temperature
 
 
         if debug_mode:
@@ -313,8 +363,8 @@ def build_model(
     )
 
     config = dict(
-        terrain=terrain,
-        modified_jcm_terrain_file=modified_jcm_terrain_file,
+        #terrain=terrain,
+        #modified_jcm_terrain_file=modified_jcm_terrain_file,
         coords=coords,
         workflow=["mapper", "atm", "ocn", "fakelnd"],
     )

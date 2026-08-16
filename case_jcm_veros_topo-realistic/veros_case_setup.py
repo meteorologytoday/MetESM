@@ -34,14 +34,14 @@ import xarray as xr
 class GridInfo:
 
     scrip_grid_file: str
-    land_sea_mask_file: str
-    land_sea_mask_threshold: float    
+    landsea_mask_file: str
+    landsea_mask_threshold: float    
     info: dict
 
-    def __init__(self, scrip_grid_file:str, land_sea_mask_file: str, land_sea_mask_threshold: float):
+    def __init__(self, scrip_grid_file:str, landsea_mask_file: str, landsea_mask_threshold: float):
         self.scrip_grid_file = scrip_grid_file
-        self.land_sea_mask_threshold = land_sea_mask_threshold
-        self.land_sea_mask_file = land_sea_mask_file
+        self.landsea_mask_threshold = landsea_mask_threshold
+        self.landsea_mask_file = landsea_mask_file
         self.get_grid_info()
 
     def get_grid_info(self):
@@ -122,10 +122,10 @@ class GridInfo:
         true_lat_xy = true_lat.transpose()  # (j, i) -> (xt, yt)
 
         # ERA5-derived fractional land-sea mask on the same SCRIP grid; convention: 1 = land.
-        mask_ds = xr.open_dataset(self.land_sea_mask_file)
+        mask_ds = xr.open_dataset(self.landsea_mask_file)
         lsm = mask_ds["lsm"].to_numpy().reshape(ny, nx)
-        is_land = lsm >= self.land_sea_mask_threshold
-        land_sea_mask = (1 - is_land.astype(int)).transpose()  # -> ocean=1/land=0, (xt, yt); Veros kbot wants 0 = land
+        is_land = lsm >= self.landsea_mask_threshold
+        landsea_mask = (1 - is_land.astype(int)).transpose()  # -> ocean=1/land=0, (xt, yt); Veros kbot wants 0 = land
 
         self.nx = nx
         self.ny = ny
@@ -134,13 +134,13 @@ class GridInfo:
         self.y_origin = y_origin
         self.x_origin = x_origin
         self.true_lat_xy = true_lat_xy
-        self.land_sea_mask = land_sea_mask
+        self.landsea_mask = landsea_mask
 
 
 def generateVerosSetup(
     scrip_grid_file: str,
-    land_sea_mask_file: str,
-    land_sea_mask_threshold: float = 0.5,
+    landsea_mask_file: str,
+    landsea_mask_threshold: float = 0.5,
     ddz: Sequence[float] = [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0],
     dt_mom: float = 1800.0,
     dt_tracer: float = 1800.0,
@@ -150,8 +150,8 @@ def generateVerosSetup(
 
     grid_info = GridInfo(
         scrip_grid_file = scrip_grid_file,
-        land_sea_mask_file = land_sea_mask_file,
-        land_sea_mask_threshold = land_sea_mask_threshold,
+        landsea_mask_file = landsea_mask_file,
+        landsea_mask_threshold = landsea_mask_threshold,
     )
 
     ddz = npx.array(ddz)
@@ -275,7 +275,7 @@ def generateVerosSetup(
             vs.kbot = update(
                 vs.kbot,
                 at[2:-2, 2:-2],
-                grid_info.land_sea_mask,
+                grid_info.landsea_mask,
             )
 
 

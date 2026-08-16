@@ -17,7 +17,7 @@ eval "$( /home/tienyiao/miniconda3/bin/conda shell.bash hook 2> /dev/null)"
 conda activate jax
 
 source /home/tienyiao/.bashrc_jcm_v2
-export PYTHONPATH=/home/tienyiao/projects_local/project_jax-esm/jem_repo/jax-esm:$PYTHONPATH
+export PYTHONPATH=/home/tienyiao/projects_local/project_jax-esm/jem_repo/dev-1.0:$PYTHONPATH
 
 # Semi-Lagrangian test setup: prepend the SL jax-gcm (dev branch, PR #625) and
 # the shoyer/dinosaur@semi-lagrangian fork ahead of everything else on
@@ -43,5 +43,6 @@ time python3 main_forward.py \
     --veros-timestep-min 60                         \
     --terrain-planet-type $terrain_planet_type      \
     --max-rerun-attempts 0                          \
+    --grid-folder data                              \
     --explode-log explode.${JOB_ID}.log
 
