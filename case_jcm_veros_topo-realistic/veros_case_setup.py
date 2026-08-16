@@ -27,34 +27,135 @@ from veros.distributed import global_min, global_max
 from veros.core.operators import numpy as npx, update, at
 from typing import Sequence
 
+import numpy as np
 import jax.numpy as npx
 import xarray as xr
 
+class GridInfo:
+
+    scrip_grid_file: str
+    land_sea_mask_file: str
+    land_sea_mask_threshold: float    
+    info: dict
+
+    def __init__(self, scrip_grid_file:str, land_sea_mask_file: str, land_sea_mask_threshold: float):
+        self.scrip_grid_file = scrip_grid_file
+        self.land_sea_mask_threshold = land_sea_mask_threshold
+        self.land_sea_mask_file = land_sea_mask_file
+        self.get_grid_info()
+
+    def get_grid_info(self):
+            
+        # `scrip_grid_file` is a SCRIP grid file (e.g. RotatedGaussianLatLon.SCRIP.nc)
+        # whose pole may be rigidly rotated away from Earth's true pole. It carries
+        # both the grid's native (pre-rotation) Gaussian lat-lon axis --
+        # `native_lat`/`native_lon` centres and `native_lat_bounds`/`native_lon_bounds`
+        # cell faces -- and each cell's true (post-rotation) geographic location
+        # (`grid_center_lat`/`grid_center_lon`). The native axis sizes and shapes
+        # the Veros grid itself (a rigid rotation preserves the sphere exactly, so
+        # the grid's own metric terms -- dxt/dyt, cost, cosu, tantr, area -- are
+        # correct when computed in the native frame). The Coriolis parameter is
+        # different: it depends on position relative to Earth's actual spin axis,
+        # which is fixed in space regardless of the coordinate mesh chosen to
+        # discretize the domain, so it must use the true (post-rotation) latitude
+        # instead -- see `set_coriolis` below.
+        grid_ds = xr.open_dataset(self.scrip_grid_file)
+        nlon, nlat = grid_ds["grid_dims"].to_numpy()
+        nx, ny = int(nlon), int(nlat)
+
+        native_lat = grid_ds["native_lat"].to_numpy()  # (ny,) centres, non-uniform (Gaussian)
+        native_lon = grid_ds["native_lon"].to_numpy()  # (nx,) centres, uniform
+
+        # Veros reconstructs cell-centre vs.yt/vs.xt from vs.dyt/vs.dxt via a
+        # leapfrog-style recursion (veros.core.numerics.u_centered_grid) that is
+        # only exact when spacing[j] equals the *central* difference of the
+        # target centres, (centre[j+1]-centre[j-1])/2 -- not the cell width
+        # implied by native_lat_bounds/native_lon_bounds. For the (uniform)
+        # longitude axis those coincide, but for the (non-uniform, Gaussian)
+        # latitude axis the pole-clamped outermost bounds break that relation,
+        # which -- left uncorrected -- introduces up to ~1.5 degrees of error at
+        # the two polar-cap rows (verified numerically), enough to meaningfully
+        # bias cos/tan there. Build spacing from centre differences instead, and
+        # solve for x_origin/y_origin by exactly replicating Veros's own
+        # reconstruction (host-side, degrees) so vs.yt/vs.xt come out identical
+        # to native_lat/native_lon.
+        def _spacing_from_centers(centers):
+            d = np.empty_like(centers)
+            d[1:-1] = (centers[2:] - centers[:-2]) / 2.0
+            d[0] = centers[1] - centers[0]
+            d[-1] = centers[-1] - centers[-2]
+            return d
+
+        def _calibrate_origin(spacing, first_center, cyclic):
+            """Solve for the origin Veros needs so that its own u_centered_grid
+            reconstruction from `spacing` places the first interior centre
+            exactly at `first_center`. Mirrors
+            veros.core.numerics.calc_grid_spacings_kernel's ghost-cell fill and
+            u_centered_grid exactly."""
+            n = spacing.size
+            padded = np.zeros(n + 4)
+            padded[2:-2] = spacing
+            if cyclic:
+                padded[-2:] = padded[2:4]
+                padded[:2] = padded[-4:-2]
+            else:
+                padded[-2:] = padded[-3]
+                padded[:2] = padded[2]
+            yu = np.zeros(n + 4)
+            yu[1:] = np.cumsum(padded[1:])
+            yt = np.zeros(n + 4)
+            yt[0] = yu[0] - padded[0] * 0.5
+            yt[1:] = 2 * yu[:-1]
+            alt = np.ones(n + 4)
+            alt[::2] = -1
+            yt = alt * np.cumsum(alt * yt)
+            return first_center - yt[2] + yu[2]
+
+        dyt = _spacing_from_centers(native_lat)                              # (ny,)
+        dxt = float(native_lon[1] - native_lon[0])                           # scalar, uniform
+        y_origin: float = float(_calibrate_origin(dyt, native_lat[0], cyclic=False))
+        x_origin: float = float(_calibrate_origin(np.full(nx, dxt), native_lon[0], cyclic=True))
+
+        # True (post-rotation) geographic latitude of each (j, i) cell -- used for
+        # the Coriolis parameter only, not for grid geometry.
+        true_lat = grid_ds["grid_center_lat"].to_numpy().reshape(ny, nx)
+        true_lat_xy = true_lat.transpose()  # (j, i) -> (xt, yt)
+
+        # ERA5-derived fractional land-sea mask on the same SCRIP grid; convention: 1 = land.
+        mask_ds = xr.open_dataset(self.land_sea_mask_file)
+        lsm = mask_ds["lsm"].to_numpy().reshape(ny, nx)
+        is_land = lsm >= self.land_sea_mask_threshold
+        land_sea_mask = (1 - is_land.astype(int)).transpose()  # -> ocean=1/land=0, (xt, yt); Veros kbot wants 0 = land
+
+        self.nx = nx
+        self.ny = ny
+        self.dyt = dyt
+        self.dxt = dxt
+        self.y_origin = y_origin
+        self.x_origin = x_origin
+        self.true_lat_xy = true_lat_xy
+        self.land_sea_mask = land_sea_mask
+
+
 def generateVerosSetup(
-    nx: int,
-    ny: int,
+    scrip_grid_file: str,
     land_sea_mask_file: str,
+    land_sea_mask_threshold: float = 0.5,
     ddz: Sequence[float] = [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0],
     dt_mom: float = 1800.0,
     dt_tracer: float = 1800.0,
-    cold_start_ocean_temperature_reference_K: float = 15.0, 
+    cold_start_ocean_temperature_reference_K: float = 15.0,
 ):
 
-    def get_land_sea_mask():
-        land_sea_mask_file
-        # original 1: land, 0: ocean
-        land_sea_mask = 1 - xr.open_dataset(land_sea_mask_file)["lsm"].to_numpy()
-        return land_sea_mask
 
-    p = 1.4
-    
+    grid_info = GridInfo(
+        scrip_grid_file = scrip_grid_file,
+        land_sea_mask_file = land_sea_mask_file,
+        land_sea_mask_threshold = land_sea_mask_threshold,
+    )
+
     ddz = npx.array(ddz)
     nz = len(ddz)
-
-    dxt = 360.0 / nx
-    dyt = 180.0 / ny
-    x_origin:float = 0.0
-    y_origin:float = -90.0
 
     class VerosCaseSetup(VerosSetup):
         """A model using spherical coordinates with a partially closed domain.
@@ -75,16 +176,16 @@ def generateVerosSetup(
             settings.identifier = "output_veros"
             settings.description = "My Veros setup"
 
-            settings.enable_streamfunction = False  # then it solve linear free surface        
+            settings.enable_streamfunction = False  # then it solve linear free surface
             settings.enable_nan_checks = False
 
-            settings.nx, settings.ny, settings.nz = nx, ny, nz
+            settings.nx, settings.ny, settings.nz = grid_info.nx, grid_info.ny, nz
             settings.dt_mom = dt_mom
             settings.dt_tracer = dt_tracer
             settings.runlen = 86400 * 365
 
-            settings.x_origin = x_origin
-            settings.y_origin = y_origin
+            settings.x_origin = grid_info.x_origin
+            settings.y_origin = grid_info.y_origin
 
             settings.coord_degree = True
             settings.enable_cyclic_x = True
@@ -97,13 +198,13 @@ def generateVerosSetup(
             settings.enable_skew_diffusion = True
 
             settings.enable_hor_friction = True
-            settings.A_h = ( (dxt+dyt)/2 * settings.degtom) ** 3 * 2e-11
+            settings.A_h = ( (grid_info.dxt + grid_info.dyt.mean())/2 * settings.degtom) ** 3 * 2e-11
             settings.enable_hor_friction_cos_scaling = True
             settings.hor_friction_cosPower = 1
 
             settings.enable_bottom_friction = True
             settings.r_bot = 1e-5
-            
+
             #settings.enable_biharmonic_friction = True
             #settings.A_hbi = 1e16
 
@@ -146,8 +247,11 @@ def generateVerosSetup(
             #ddz = npx.array(
             #    [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0]
             #)
-            vs.dxt = update(vs.dxt, at[...], dxt)
-            vs.dyt = update(vs.dyt, at[...], dyt)
+            # Ghost cells ([:2]/[-2:]) are filled automatically from the
+            # interior by calc_grid_spacings_kernel -- only the interior
+            # needs to be set here (see e.g. global_flexible's set_grid).
+            vs.dxt = update(vs.dxt, at[2:-2], grid_info.dxt)
+            vs.dyt = update(vs.dyt, at[2:-2], grid_info.dyt)  # per-row array: native Gaussian latitude spacing is non-uniform
             vs.dzt = update(vs.dzt, at[...], ddz[::-1]) # ocean grid starts from below
 
 
@@ -155,20 +259,23 @@ def generateVerosSetup(
         def set_coriolis(self, state):
             vs = state.variables
             settings = state.settings
+            # Coriolis depends on position relative to Earth's true spin axis,
+            # not the grid's own (rotated) latitude -- see note in
+            # generateVerosSetup above.
             vs.coriolis_t = update(
-                vs.coriolis_t, at[...], 2 * settings.omega * npx.sin(vs.yt[None, :] / 180.0 * settings.pi)
+                vs.coriolis_t, at[2:-2, 2:-2], 2 * settings.omega * npx.sin(grid_info.true_lat_xy / 180.0 * settings.pi)
             )
 
         @veros_routine
         def set_topography(self, state):
             vs = state.variables
             x, y = npx.meshgrid(vs.xt, vs.yt, indexing="ij")
-             
+
             vs.kbot = npx.zeros_like(x)
             vs.kbot = update(
                 vs.kbot,
                 at[2:-2, 2:-2],
-                get_land_sea_mask()
+                grid_info.land_sea_mask,
             )
 
 
@@ -183,7 +290,7 @@ def generateVerosSetup(
             amplitude = 5.0
             distace_square = ((vs.yt[None, :, None] - y_center) ** 2) / (2 * sigma ** 2)
             temp_anomaly = 5.0 * npx.exp(-distace_square) * vs.maskT * 0
-           
+
             vs.temp = update(vs.temp, at[...], ((1 - vs.zt[None, None, :] / vs.zw[0]) * cold_start_ocean_temperature_reference_K * vs.maskT + temp_anomaly)[..., None] )
             vs.salt = update(vs.salt, at[...], 35.0 * vs.maskT[..., None])
 
@@ -229,8 +336,8 @@ def generateVerosSetup(
         def set_diagnostics(self, state):
             settings = state.settings
             diagnostics = state.diagnostics
-            diagnostics.clear()       
-            
+            diagnostics.clear()
+
             """
             diagnostics["snapshot"].output_frequency = 86400 * 10
             diagnostics["averages"].output_variables = (
