@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#SBATCH --job-name=JEM-double_drake_unequal_basin_width
+#SBATCH --job-name=JEM-SL-double_drake_unequal_basin_width
 #SBATCH --nodes 1
 #SBATCH --tasks 1
 #SBATCH --partition=gpu
@@ -18,6 +18,14 @@ conda activate jax
 
 source /home/tienyiao/.bashrc_jcm_v2
 export PYTHONPATH=/home/tienyiao/projects_local/project_jax-esm/jem_repo/jax-esm:$PYTHONPATH
+
+# Semi-Lagrangian test setup: prepend the SL jax-gcm (dev branch, PR #625) and
+# the shoyer/dinosaur@semi-lagrangian fork ahead of everything else on
+# PYTHONPATH, so they shadow the pip-installed main-branch jcm / PyPI
+# dinosaur==1.3.6 in the `jax` conda env. Comment this out to go back to the
+# normal (Eulerian) setup.
+export PYTHONPATH=/home/tienyiao/projects_local/project_jax-esm/jcm_collections/semi-lagrangian/jax-gcm:/home/tienyiao/projects_local/project_jax-esm/jcm_collections/semi-lagrangian/dinosaur:$PYTHONPATH
+
 export PYTHONHASHSEED=0
 #export XLA_FLAGS="--xla_gpu_deterministic_ops=true"
 

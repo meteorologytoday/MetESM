@@ -43,6 +43,8 @@ args = parser.parse_args()
 
 print(f"jcm library is located at: {jcm.__file__}")
 print(f"jem library is located at: {jem.__file__}")
+import dinosaur
+print(f"dinosaur library is located at: {dinosaur.__file__}")
 
 # Check available devices
 print(f"Available devices: {jax.devices()}")
@@ -78,6 +80,10 @@ ocn_model = model.components["ocn"].raw_component
 
 print("Model info: ")
 tree_tools.print_tree(model.get_info(), root="Model")
+
+atm_model = model.components["atm"].raw_component
+transport_scheme = type(atm_model.dycore._primitive).__name__
+print(f"jcm dycore transport scheme: {transport_scheme}")
 
 # Run Coupled Model
 initial_carry = model.initialize()
