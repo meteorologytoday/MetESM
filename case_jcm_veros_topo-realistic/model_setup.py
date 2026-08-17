@@ -101,6 +101,39 @@ def _freeze_season(atm_model, freeze_season_at_day):
     atm_model._date_from_sim_time = frozen_date_from_sim_time
 
 
+def _build_jcm_terrain_file(mask_file, output_file):
+    """Build a JCM-canonical terrain file (dims (lon, lat), vars lsm/orog --
+    see jcm.terrain.TerrainData.from_file) from an ERA5-derived fractional
+    land-sea mask + topography file (dims (latitude, longitude), vars
+    lsm/topography, extra singleton valid_time axis) -- e.g.
+    landsea_mask_fraction_JCM_T{n}.nc. Deliberately *not* using
+    modify_jcm_terrain here: that only supports idealized synthetic
+    geographies (aquaplanet, double_drake, ...), not real ERA5 topography.
+    """
+    ds = xr.open_dataset(mask_file)
+    lsm = ds["lsm"]
+    orog = ds["topography"]
+    if "valid_time" in lsm.dims:
+        lsm = lsm.isel(valid_time=0, drop=True)
+        orog = orog.isel(valid_time=0, drop=True)
+
+    out_ds = xr.Dataset(
+        data_vars=dict(
+            lsm=(("lon", "lat"), lsm.transpose("longitude", "latitude").to_numpy()),
+            orog=(("lon", "lat"), orog.transpose("longitude", "latitude").to_numpy()),
+        ),
+        coords=dict(
+            lon=("lon", ds["lon"].to_numpy()),
+            lat=("lat", ds["lat"].to_numpy()),
+        ),
+        attrs=dict(grid_type="gaussian"),
+    )
+    output_file = Path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    out_ds.to_netcdf(output_file)
+    return output_file
+
+
 def build_model(
     *,
     truncation_number,
@@ -163,20 +196,23 @@ def build_model(
 
     coords = get_speedy_coords(spectral_truncation=truncation_number)
 
-    # TODO: real (orographic) topography is still needed here -- currently
-    # disabled, so JCM runs over a flat surface (no mountains) and its
-    # land-sea mask isn't wired into this case's grid/Coriolis pipeline yet.
-    #jcm_files = generate_jcm_forcing_and_topography_files(resolution=truncation_number)
-    #modified_jcm_terrain_file = modify_jcm_terrain(
-    #    jcm_files["terrain"], terrain_planet_type, terrain_output_directory,
-    #)
-    #terrain = TerrainData.from_file(modified_jcm_terrain_file, coords=coords)
+    # Real (ERA5-derived) topography, on JCM's own native (unrotated) grid --
+    # not the rotated ocean grid's mask file. JCM's Coriolis parameter is
+    # `2*omega*sin(lat)` computed directly from its own native latitude
+    # (dinosaur.primitive_equations.PrimitiveEquations.coriolis_parameter,
+    # hard-coded, no override hook), so terrain must be geographically
+    # consistent with *that* latitude, not the ocean's rotated one.
+    jcm_terrain_file = _build_jcm_terrain_file(
+        data_files["landsea_mask"]["atm"],
+        Path(terrain_output_directory) / f"terrain_JCM_T{truncation_number:d}.nc",
+    )
+    terrain = TerrainData.from_file(jcm_terrain_file, coords=coords)
 
     # Create JCM
     atm_model = jcm.model.Model(
         coords=coords,
         start_date=start_datetime,
-        #terrain=terrain,
+        terrain=terrain,
         time_step=jcm_dt/60.0,
         calendar=calendar,
     )
