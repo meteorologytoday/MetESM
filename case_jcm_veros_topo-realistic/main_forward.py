@@ -38,7 +38,6 @@ parser.add_argument("--do-not-average-time", action="store_true", help="Do not a
 parser.add_argument("--max-rerun-attempts", type=int, help="If model exploded, then the model would rerun because stochasticitiy might bypass the instability next time. This value is by default 0, but if you set any positive integer number, model will rerun N times before it gave up.", default=0)
 parser.add_argument("--explode-log", type=str, help="Path to log file for recording model explosion events.", default="explode.log")
 parser.add_argument("--debug-mode", action="store_true", help="Turn on debug mode. Detect NaN and enter breakpoint.")
-parser.add_argument("--terrain-planet-type", type=str, help="Simulation name for output", required=True)
 parser.add_argument("--grid-folder", type=str, help="Grid folder containing grid, land-sea mask, and regrid weightings.", required=True)
 args = parser.parse_args()
 
@@ -72,7 +71,6 @@ model, config = build_model(
     coupling_timestep=coupling_timestep,
     calendar=calendar,
     debug_mode=args.debug_mode,
-    terrain_planet_type=args.terrain_planet_type,
     jcm_dt = args.jcm_timestep_min * 60.0,
     veros_dt_mom=args.veros_timestep_min * 60,
     veros_dt_tracer=args.veros_timestep_min * 60,

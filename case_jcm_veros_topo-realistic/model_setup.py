@@ -140,8 +140,6 @@ def build_model(
     start_datetime,
     coupling_timestep,
     calendar,
-    terrain_planet_type,
-    terrain_output_directory="./data",
     veros_dt_mom=3600.0,
     veros_dt_tracer=3600.0,
     jcm_dt=1800.0,
@@ -204,7 +202,7 @@ def build_model(
     # consistent with *that* latitude, not the ocean's rotated one.
     jcm_terrain_file = _build_jcm_terrain_file(
         data_files["landsea_mask"]["atm"],
-        Path(terrain_output_directory) / f"terrain_JCM_T{truncation_number:d}.nc",
+        grid_folder / f"terrain_JCM_T{truncation_number:d}.nc",
     )
     terrain = TerrainData.from_file(jcm_terrain_file, coords=coords)
 

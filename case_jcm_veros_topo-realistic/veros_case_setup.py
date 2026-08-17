@@ -180,7 +180,7 @@ def generateVerosSetup(
             settings.description = "My Veros setup"
 
             settings.enable_streamfunction = False  # then it solve linear free surface
-            settings.enable_nan_checks = False
+            settings.enable_nan_checks = True
 
             settings.nx, settings.ny, settings.nz = grid_info.nx, grid_info.ny, nz
             settings.dt_mom = dt_mom
