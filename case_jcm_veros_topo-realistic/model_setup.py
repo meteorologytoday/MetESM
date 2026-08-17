@@ -151,9 +151,21 @@ def build_model(
             },
         },
     }
+            
+    grid_ds = xr.load_dataset(str(data_files["grid"]["ocn"]))
+    # grid_cos_angle/grid_sin_angle are flat (grid_size,), SCRIP lon-fastest;
+    # reshape with order="F" to (n_lon, n_lat), matching ESMFRegridder's own
+    # convention so these line up index-for-index with regridded u0/v0.
+    nlon, nlat = (int(n) for n in grid_ds["grid_dims"].to_numpy())
+    cos_angle = jnp.array(grid_ds["grid_cos_angle"].to_numpy().reshape((nlon, nlat), order="F"))
+    sin_angle = jnp.array(grid_ds["grid_sin_angle"].to_numpy().reshape((nlon, nlat), order="F"))
+
 
     coords = get_speedy_coords(spectral_truncation=truncation_number)
 
+    # TODO: real (orographic) topography is still needed here -- currently
+    # disabled, so JCM runs over a flat surface (no mountains) and its
+    # land-sea mask isn't wired into this case's grid/Coriolis pipeline yet.
     #jcm_files = generate_jcm_forcing_and_topography_files(resolution=truncation_number)
     #modified_jcm_terrain_file = modify_jcm_terrain(
     #    jcm_files["terrain"], terrain_planet_type, terrain_output_directory,
@@ -248,15 +260,16 @@ def build_model(
         # its own function or module.
         drag_coefficient = 1e-3  # dimensionless
         air_density = 1.22  # kg / m^3
-        # TODO: `jcm_to_veros_regridder` interpolates u0/v0 component-wise;
-        # it doesn't rotate the wind vector into the ocean grid's local
-        # (rotated) frame. Since the ocean grid's pole is displaced from the
-        # true pole, true-east/north isn't aligned with the grid's own x/y
-        # axes everywhere, so this is an approximation. Fine for now, but a
-        # correct version needs the per-cell rotation angle (the SCRIP
-        # file's `grid_angle`/`grid_cos_angle`/`grid_sin_angle`) applied here.
-        wind_x = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].u0)
-        wind_y = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].v0)
+        # `jcm_to_veros_regridder` interpolates u0/v0 component-wise, which
+        # is fine since JCM's own grid is unrotated (u0/v0 are genuinely
+        # true-east/true-north everywhere on it). The result is then
+        # rotated into the ocean grid's local (rotated) frame below using
+        # its per-cell `grid_cos_angle`/`grid_sin_angle`.
+        u0 = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].u0)
+        v0 = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].v0)
+
+        wind_x =   cos_angle * u0 + sin_angle * v0 
+        wind_y = - sin_angle * u0 + cos_angle * v0
         # `sqrt` has an infinite derivative at 0, so AD through `sqrt(x)`
         # blows up to NaN as x -> 0, even though the primal value (0) stays
         # finite. Floor the *squared* speed -- sqrt's argument -- at

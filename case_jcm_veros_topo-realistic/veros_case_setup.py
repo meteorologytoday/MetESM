@@ -121,6 +121,9 @@ class GridInfo:
         true_lat = grid_ds["grid_center_lat"].to_numpy().reshape(ny, nx)
         true_lat_xy = true_lat.transpose()  # (j, i) -> (xt, yt)
 
+        # TODO: real bathymetry is still needed here -- this only gives a
+        # binary land/sea mask, so every ocean column gets the same flat
+        # bottom depth (kbot) rather than actual varying ocean depth.
         # ERA5-derived fractional land-sea mask on the same SCRIP grid; convention: 1 = land.
         mask_ds = xr.open_dataset(self.landsea_mask_file)
         lsm = mask_ds["lsm"].to_numpy().reshape(ny, nx)
